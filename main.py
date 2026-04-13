@@ -1,10 +1,19 @@
 import os
 import uvicorn
+import asyncio
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from agent import summarize
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
+from agent.agent import root_agent
 
-app = FastAPI(title="Summarizer Agent API")
+app = FastAPI(title="ADK Summarizer Agent API")
+
+# ADK session service
+session_service = InMemorySessionService()
+APP_NAME  = "summarizer_agent_app"
+USER_ID   = "render_user"
 
 class SummarizeRequest(BaseModel):
     text: str
@@ -14,20 +23,50 @@ class SummarizeResponse(BaseModel):
     status: str
 
 @app.get("/")
-async def root():
-    return {"message": "Summarizer Agent is running!"}
+def root():
+    return {"message": "ADK Summarizer Agent is running!"}
 
 @app.get("/health")
-async def health():
-    return {"status": "healthy"}
+def health():
+    return {"status": "healthy", "agent": "summarizer_agent", "framework": "Google ADK"}
 
 @app.post("/summarize", response_model=SummarizeResponse)
-async def summarize_endpoint(request: SummarizeRequest):
+async def summarize(request: SummarizeRequest):
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
+
     try:
-        result = summarize(request.text)
-        return SummarizeResponse(summary=result, status="success")
+        # Create a fresh session per request (stateless)
+        session = await session_service.create_session(
+            app_name=APP_NAME,
+            user_id=USER_ID
+        )
+
+        runner = Runner(
+            agent=root_agent,
+            app_name=APP_NAME,
+            session_service=session_service
+        )
+
+        # Send message to the ADK agent
+        user_message = types.Content(
+            role="user",
+            parts=[types.Part(text=f"Please summarize this text: {request.text}")]
+        )
+
+        final_response = ""
+        async for event in runner.run_async(
+            user_id=USER_ID,
+            session_id=session.id,
+            new_message=user_message
+        ):
+            if event.is_final_response() and event.content:
+                for part in event.content.parts:
+                    if part.text:
+                        final_response += part.text
+
+        return SummarizeResponse(summary=final_response, status="success")
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
